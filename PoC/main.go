@@ -7,12 +7,19 @@ import (
 	"io/ioutil"
 	"net/http"
 	"os/exec"
+	"strings"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/gorilla/mux"
 )
 
-func NewDR(runnerUUID string) *DockerRunner {
+const (
+	RunnerTimeout = 3 * time.Second
+	StopTimeout   = 3 * time.Second
+)
+
+func NewDR() *DockerRunner {
 	dockerBinary, lookErr := exec.LookPath("docker")
 	if lookErr != nil {
 		panic(lookErr)
@@ -26,7 +33,7 @@ func NewDR(runnerUUID string) *DockerRunner {
 	return &DockerRunner{
 		DockerBinary: dockerBinary,
 		Volume:       id.String(),
-		RunnerUUID:   runnerUUID,
+		RunnerUUID:   "",
 	}
 }
 
@@ -36,8 +43,26 @@ type DockerRunner struct {
 	RunnerUUID   string
 }
 
+func (dr *DockerRunner) SetRunnerUUID(runnerUUID string) {
+	fmt.Println("Setting runner UUID to", runnerUUID)
+	dr.RunnerUUID = runnerUUID
+}
+
+func (dr *DockerRunner) ListContainersCmd(ctx context.Context) *exec.Cmd {
+	return exec.CommandContext(ctx, dr.DockerBinary, "ps",
+		"--format", "{{.Names}}")
+}
+
+func (dr *DockerRunner) ListContainers(ctx context.Context) (result []string) {
+	out := dr.GetContainerOutput(dr.ListContainersCmd(ctx))
+	result = append(result, strings.Split(out, "\n")...)
+
+	return
+}
+
 func (dr *DockerRunner) StartRunnerContainer(ctx context.Context) *exec.Cmd {
 	return exec.CommandContext(ctx, dr.DockerBinary, "run", "-d",
+		fmt.Sprintf("--name=oac-%s", dr.RunnerUUID),
 		"--network=none", "--memory=128m", "--memory-swap=128m",
 		"--read-only",
 		"-v", fmt.Sprintf("%s:/data:ro", dr.Volume),
@@ -93,7 +118,7 @@ type WebApp struct {
 	Runner *DockerRunner
 }
 
-func (wa *WebApp) Editor(w http.ResponseWriter, r *http.Request) {
+func (wa *WebApp) Editor(w http.ResponseWriter, r *http.Request) { // nolint:funlen
 	var (
 		response Response
 	)
@@ -116,11 +141,34 @@ func (wa *WebApp) Editor(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
+		runnerUUID := r.Form.Get("id")
+
+		if len(runnerUUID) == 0 {
+			http.Error(w, "bad request", http.StatusBadRequest)
+			return
+		}
+
+		wa.Runner.SetRunnerUUID(runnerUUID)
+		// Run here
+		runnerCtx, runnerCancel := context.WithTimeout(context.Background(), RunnerTimeout)
+		defer runnerCancel()
+
+		cmd := wa.Runner.StartRunnerContainer(runnerCtx)
+		containerID := wa.Runner.GetContainerOutput(cmd)
+
+		// Set output
 		response = Response{
-			ID:     r.Form.Get("id"),
+			ID:     runnerUUID,
 			Input:  r.Form.Get("comment"),
 			Output: "lol",
 		}
+		// Stop container
+		ctx, cancel := context.WithTimeout(context.Background(), StopTimeout)
+		defer cancel()
+
+		cmd = wa.Runner.StopContainer(ctx, strings.TrimRight(containerID, "\n"))
+		out := wa.Runner.GetContainerOutput(cmd)
+		fmt.Println("Stop output: ", out)
 	}
 
 	w.Header().Add("Content-Type", "text/html; charset=utf-8")
@@ -149,21 +197,21 @@ func (wa *WebApp) IndexPage(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-/*
-	dr := NewDR("da8f91bf-f8f6-42fb-a9db-cc25c0e564d8")
-
-	cmd := dr.StartRunnerContainer(context.Background())
-	out := dr.GetContainerOutput(cmd)
-	containerID := strings.TrimRight(out, "\n")
-	time.Sleep(3 * time.Second) // nolint
-	fmt.Printf("`%s`\n", containerID)
-	cmd = dr.StopContainer(context.Background(), containerID)
-	out = dr.GetContainerOutput(cmd)
-	fmt.Println(out)
-*/
-
 func main() {
-	wa := &WebApp{Runner: NewDR("123-124")}
+	runner := NewDR()
+	ctx, cancel := context.WithTimeout(context.Background(), StopTimeout)
+
+	defer cancel()
+
+	for _, cid := range runner.ListContainers(ctx) {
+		if strings.HasPrefix(cid, "oac-") {
+			cmd := runner.StopContainer(ctx, cid)
+			out := runner.GetContainerOutput(cmd)
+			fmt.Println(out)
+		}
+	}
+
+	wa := &WebApp{Runner: NewDR()}
 	r := mux.NewRouter()
 	r.HandleFunc("/", wa.IndexPage)
 	r.HandleFunc("/index.htm", wa.IndexPage)
