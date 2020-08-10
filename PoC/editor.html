@@ -1,0 +1,9 @@
+ <form action="/editor" id="usrform" method="POST">
+  <button type="submit">Run</button>
+</form>
+
+<textarea name="comment" form="usrform">{{.Input}}</textarea>
+
+
+<br>
+<textarea name="output">{{.Output}}</textarea>
