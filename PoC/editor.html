@@ -1,5 +1,6 @@
  <form action="/editor" id="usrform" method="POST">
-  <button type="submit">Run</button>
+    <input id="id" name="id" type="hidden" value="{{.ID}}">
+    <button type="submit">Run</button>
 </form>
 
 <textarea name="comment" form="usrform">{{.Input}}</textarea>

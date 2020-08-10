@@ -84,6 +84,7 @@ func (dr *DockerRunner) GetContainerOutput(cmd *exec.Cmd) string {
 }
 
 type Response struct {
+	ID     string
 	Input  string
 	Output string
 }
@@ -97,6 +98,15 @@ func (wa *WebApp) Editor(w http.ResponseWriter, r *http.Request) {
 		response Response
 	)
 
+	if len(response.ID) == 0 {
+		id, err := uuid.NewRandom()
+		if err != nil {
+			panic(err)
+		}
+
+		response.ID = id.String()
+	}
+
 	response.Input = "Enter text here..."
 
 	if r.Method == "POST" {
@@ -107,6 +117,7 @@ func (wa *WebApp) Editor(w http.ResponseWriter, r *http.Request) {
 		}
 
 		response = Response{
+			ID:     r.Form.Get("id"),
 			Input:  r.Form.Get("comment"),
 			Output: "lol",
 		}
