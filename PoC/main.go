@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"flag"
 	"fmt"
 	"html/template"
 	"io/ioutil"
@@ -91,7 +92,7 @@ func (dr *DockerRunner) StartTaskInsideContainer(ctx context.Context, containerI
 func (dr *DockerRunner) StartTaskContainer(ctx context.Context) *exec.Cmd {
 	return exec.CommandContext(ctx, dr.DockerBinary, "run",
 		"-v", fmt.Sprintf("%s:/data", dr.Volume),
-		"oac-task", "wget", "-O", "/data/script",
+		"alpine", "wget", "-O", "/data/script",
 		fmt.Sprintf("http://%s/code/%s", dr.MyIP, dr.RunnerUUID),
 	)
 }
@@ -294,11 +295,6 @@ func (wa *WebApp) Editor(w http.ResponseWriter, r *http.Request) { // nolint:fun
 		}
 	}
 
-	// w.Header().Add("Content-Type", "text/html; charset=utf-8")
-	//
-
-	fmt.Println(response)
-
 	tpl := template.Must(template.ParseFiles("editor.html"))
 
 	err = tpl.Execute(w, response)
@@ -323,8 +319,19 @@ func (wa *WebApp) IndexPage(w http.ResponseWriter, r *http.Request) {
 }
 
 func main() {
+	var (
+		extIP = flag.String("ext-ip", "", "Specify non-local IP")
+	)
+
+	flag.Parse()
+
+	if len(*extIP) == 0 {
+		fmt.Println("Cannot run without non-local IP, e.g. 192.168.0.100")
+		return
+	}
+
 	cache := memcache.New(log.New())
-	runner := NewDR("192.168.3.247:8000", cache)
+	runner := NewDR(fmt.Sprintf("%s:8000", *extIP), cache)
 	ctx, cancel := context.WithTimeout(context.Background(), StopTimeout)
 
 	defer cancel()
@@ -354,7 +361,7 @@ func main() {
 	r.HandleFunc("/editor", wa.Editor).Methods("POST")
 	r.HandleFunc("/editor", wa.Editor).Methods("GET")
 
-	srv := http.Server{Addr: "0.0.0.0:8000", Handler: r}
+	srv := http.Server{Addr: fmt.Sprintf("%s:8000", *extIP), Handler: r}
 
 	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		panic(err)
