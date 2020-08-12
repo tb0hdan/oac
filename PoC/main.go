@@ -19,8 +19,8 @@ import (
 )
 
 const (
-	RunnerTimeout = 3 * time.Second
-	StopTimeout   = 3 * time.Second
+	RunnerTimeout = 10 * time.Second
+	StopTimeout   = 10 * time.Second
 )
 
 func NewDR(myIP string, cache *memcache.CacheType) *DockerRunner {
@@ -72,8 +72,19 @@ func (dr *DockerRunner) ListContainers(ctx context.Context) (result []string) {
 	return
 }
 
-func (dr *DockerRunner) StartRunnerContainer(ctx context.Context) *exec.Cmd {
-	image := "python:3.7-alpine"
+func (dr *DockerRunner) StartRunnerContainer(ctx context.Context, language string) *exec.Cmd {
+	var (
+		image string
+	)
+
+	switch language {
+	case "go":
+		image = "golang:1.14-alpine"
+	case "python":
+		image = "python:3.7-alpine"
+	default:
+		image = "alpine"
+	}
 
 	return exec.CommandContext(ctx, dr.DockerBinary, "run", "-d",
 		fmt.Sprintf("--name=oac-%s", dr.RunnerUUID),
@@ -94,7 +105,7 @@ func (dr *DockerRunner) StartTaskContainer(ctx context.Context) *exec.Cmd {
 	return exec.CommandContext(ctx, dr.DockerBinary, "run",
 		"-v", fmt.Sprintf("%s:/data", dr.Volume),
 		"oac-task", "wget", "-O", "/data/script",
-		fmt.Sprintf("http://%s/static/%s", dr.MyIP, dr.RunnerUUID),
+		fmt.Sprintf("http://%s/code/%s", dr.MyIP, dr.RunnerUUID),
 	)
 }
 
@@ -140,7 +151,7 @@ type WebApp struct {
 }
 
 func (wa *WebApp) writeCode(runnerUUID, code string) error {
-	f, err := os.Create(path.Join("static", runnerUUID))
+	f, err := os.Create(path.Join("code", runnerUUID))
 
 	if err != nil {
 		return err
@@ -163,106 +174,133 @@ func (wa *WebApp) writeCode(runnerUUID, code string) error {
 	return nil
 }
 
-func (wa *WebApp) Editor(w http.ResponseWriter, r *http.Request) { // nolint:funlen
+func (wa *WebApp) editorPOST(r *http.Request, response *Response) (*Response, error) { // nolint
 	var (
-		response    Response
 		containerID string
 	)
 
-	if len(response.ID) == 0 {
-		id, err := uuid.NewRandom()
-		if err != nil {
-			panic(err)
-		}
+	err := r.ParseForm()
 
-		response.ID = id.String()
+	if err != nil {
+		return response, err
 	}
 
-	response.Input = "Enter text here..."
+	runnerUUID := r.Form.Get("id")
+
+	if len(runnerUUID) == 0 {
+		return response, fmt.Errorf("runnerUUID is empty")
+	}
+
+	// Save code
+	code := r.Form.Get("comment")
+	language := r.Form.Get("language")
+	//
+	err = wa.writeCode(runnerUUID, code)
+	if err != nil {
+		return response, err
+	}
+	//
+	wa.Runner.SetRunnerUUID(runnerUUID)
+
+	cid, ok := wa.Runner.Cache.Get(runnerUUID)
+	if !ok {
+		// start container
+		// Run here
+		runnerCtx, runnerCancel := context.WithTimeout(context.Background(), RunnerTimeout)
+		defer runnerCancel()
+
+		cmd := wa.Runner.StartRunnerContainer(runnerCtx, language)
+		out, err := wa.Runner.GetContainerOutput(cmd)
+
+		if err != nil {
+			return response, err
+		}
+
+		containerID = strings.TrimRight(out, "\n")
+		fmt.Println("Start: ", containerID, err)
+		wa.Runner.Cache.Set(runnerUUID, containerID)
+	} else {
+		fmt.Println("in cache", cid)
+		containerID = cid.(string)
+	}
+
+	if len(containerID) == 0 {
+		fmt.Println(wa.Runner.Cache.Get(runnerUUID))
+		return response, fmt.Errorf("containerID is empty")
+	}
+
+	fmt.Println("Cache: ", containerID)
+	// get script
+	taskCtx, taskCancel := context.WithTimeout(context.Background(), RunnerTimeout)
+	defer taskCancel()
+
+	cmd := wa.Runner.StartTaskContainer(taskCtx)
+	out, err := wa.Runner.GetContainerOutput(cmd)
+	fmt.Println("Task ", out, err)
+
+	// Get task output
+	taskInCtx, taskInCancel := context.WithTimeout(context.Background(), RunnerTimeout)
+	defer taskInCancel()
+
+	cmdX := wa.Runner.StartTaskInsideContainer(taskInCtx, containerID)
+	msg, err := wa.Runner.GetContainerOutput(cmdX)
+
+	if err != nil {
+		msg += err.Error()
+	}
+
+	fmt.Println("Inside ", containerID, msg)
+	// Set output
+	response.ID = runnerUUID
+	response.Input = code
+	response.Output = msg
+
+	// Stop container
+	/*
+		ctx, cancel := context.WithTimeout(context.Background(), StopTimeout)
+		defer cancel()
+
+		cmd = wa.Runner.StopContainer(ctx, strings.TrimRight(containerID, "\n"))
+		out, err = wa.Runner.GetContainerOutput(cmd)
+		fmt.Println("Stop output: ", out, err) */
+	// nolint
+
+	return response, nil
+}
+
+func (wa *WebApp) Editor(w http.ResponseWriter, r *http.Request) { // nolint:funlen
+	var (
+		err error
+	)
+
+	id, err := uuid.NewRandom()
+	if err != nil {
+		panic(err)
+	}
+
+	response := &Response{
+		ID:    id.String(),
+		Input: "Enter text here...",
+	}
 
 	if r.Method == "POST" {
-		err := r.ParseForm()
+		response, err = wa.editorPOST(r, response)
 		if err != nil {
+			fmt.Println(err)
 			http.Error(w, err.Error(), http.StatusBadRequest)
+
 			return
 		}
+	}
 
-		runnerUUID := r.Form.Get("id")
+	// w.Header().Add("Content-Type", "text/html; charset=utf-8")
+	//
 
-		if len(runnerUUID) == 0 {
-			http.Error(w, "bad request", http.StatusBadRequest)
-			return
-		}
+	fmt.Println(response)
 
-		// Save code
-		code := r.Form.Get("comment")
-		//
-		err = wa.writeCode(runnerUUID, code)
-		if err != nil {
-			http.Error(w, "bad request", http.StatusBadRequest)
-			return
-		}
-		//
-		wa.Runner.SetRunnerUUID(runnerUUID)
+	tpl := template.Must(template.ParseFiles("editor.html"))
 
-		if cid, ok := wa.Runner.Cache.Get(runnerUUID); !ok {
-			// start container
-			// Run here
-			runnerCtx, runnerCancel := context.WithTimeout(context.Background(), RunnerTimeout)
-			defer runnerCancel()
-
-			cmd := wa.Runner.StartRunnerContainer(runnerCtx)
-			containerID, err := wa.Runner.GetContainerOutput(cmd)
-			containerID = strings.TrimRight(containerID, "\n")
-			fmt.Println("Start: ", containerID, err)
-			wa.Runner.Cache.Set(runnerUUID, containerID)
-		} else {
-			containerID = cid.(string)
-		}
-
-		fmt.Println("Cache: ", containerID)
-		// get script
-		taskCtx, taskCancel := context.WithTimeout(context.Background(), RunnerTimeout)
-		defer taskCancel()
-
-		cmd := wa.Runner.StartTaskContainer(taskCtx)
-		out, err := wa.Runner.GetContainerOutput(cmd)
-		fmt.Println(out, err)
-
-		// Get task output
-		taskInCtx, taskInCancel := context.WithTimeout(context.Background(), RunnerTimeout)
-		defer taskInCancel()
-
-		if len(containerID) == 0 {
-			http.Error(w, "no container id", http.StatusBadRequest)
-			return
-		}
-
-		cmdX := wa.Runner.StartTaskInsideContainer(taskInCtx, containerID)
-		taskOut, err := wa.Runner.GetContainerOutput(cmdX)
-		fmt.Println(containerID, taskOut+"\n"+err.Error())
-		// Set output
-		response = Response{
-			ID:     runnerUUID,
-			Input:  code,
-			Output: taskOut + "\n" + err.Error(),
-		}
-		// Stop container
-		/*
-			ctx, cancel := context.WithTimeout(context.Background(), StopTimeout)
-			defer cancel()
-
-			cmd = wa.Runner.StopContainer(ctx, strings.TrimRight(containerID, "\n"))
-			out, err = wa.Runner.GetContainerOutput(cmd)
-			fmt.Println("Stop output: ", out, err) */
-	} // nolint
-
-	w.Header().Add("Content-Type", "text/html; charset=utf-8")
-	w.WriteHeader(http.StatusOK)
-
-	template := template.Must(template.ParseFiles("editor.html"))
-
-	err := template.Execute(w, response)
+	err = tpl.Execute(w, response)
 
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
@@ -307,6 +345,7 @@ func main() {
 	r := mux.NewRouter()
 
 	r.PathPrefix("/static/").Handler(http.StripPrefix("/static/", http.FileServer(http.Dir("./static"))))
+	r.PathPrefix("/code/").Handler(http.StripPrefix("/code/", http.FileServer(http.Dir("./code"))))
 
 	r.HandleFunc("/", wa.IndexPage)
 	r.HandleFunc("/index.htm", wa.IndexPage)

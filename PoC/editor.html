@@ -1,5 +1,16 @@
+<html>
+<head>
+    <title>OAC Editor Playground</title>
+    <link rel="stylesheet" type="text/css" href="/static/style.css">
+</head>
+<body>
  <form action="/editor" id="usrform" method="POST">
     <input id="id" name="id" type="hidden" value="{{.ID}}">
+    <select id="language" name="language">
+	<option value="python">Python</option>
+	<option value="go">Go</option>
+	<option value="shell">Shell</option>
+  </select>
     <button type="submit">Run</button>
 </form>
 
@@ -8,3 +19,5 @@
 
 <br>
 <textarea name="output">{{.Output}}</textarea>
+</body>
+</html>
