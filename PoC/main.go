@@ -72,20 +72,7 @@ func (dr *DockerRunner) ListContainers(ctx context.Context) (result []string) {
 	return
 }
 
-func (dr *DockerRunner) StartRunnerContainer(ctx context.Context, language string) *exec.Cmd {
-	var (
-		image string
-	)
-
-	switch language {
-	case "go":
-		image = "golang:1.14-alpine"
-	case "python":
-		image = "python:3.7-alpine"
-	default:
-		image = "alpine"
-	}
-
+func (dr *DockerRunner) StartRunnerContainer(ctx context.Context, image string) *exec.Cmd {
 	return exec.CommandContext(ctx, dr.DockerBinary, "run", "-d",
 		fmt.Sprintf("--name=oac-%s", dr.RunnerUUID),
 		"--network=none", "--memory=128m", "--memory-swap=128m",
@@ -95,10 +82,10 @@ func (dr *DockerRunner) StartRunnerContainer(ctx context.Context, language strin
 		"-c", "while :; do sleep 1; done")
 }
 
-func (dr *DockerRunner) StartTaskInsideContainer(ctx context.Context, containerID string) *exec.Cmd {
+func (dr *DockerRunner) StartTaskInsideContainer(ctx context.Context, containerID, shell string) *exec.Cmd {
 	return exec.CommandContext(ctx, dr.DockerBinary, "exec",
 		containerID,
-		"python", "/data/script")
+		shell, "/data/script")
 }
 
 func (dr *DockerRunner) StartTaskContainer(ctx context.Context) *exec.Cmd {
@@ -177,6 +164,8 @@ func (wa *WebApp) writeCode(runnerUUID, code string) error {
 func (wa *WebApp) editorPOST(r *http.Request, response *Response) (*Response, error) { // nolint
 	var (
 		containerID string
+		image       string
+		shell       string
 	)
 
 	err := r.ParseForm()
@@ -202,6 +191,18 @@ func (wa *WebApp) editorPOST(r *http.Request, response *Response) (*Response, er
 	//
 	wa.Runner.SetRunnerUUID(runnerUUID)
 
+	switch language {
+	case "go":
+		image = "golang:1.14-alpine"
+		shell = "go"
+	case "python":
+		image = "python:3.7-alpine"
+		shell = "python"
+	default:
+		image = "alpine"
+		shell = "sh"
+	}
+
 	cid, ok := wa.Runner.Cache.Get(runnerUUID)
 	if !ok {
 		// start container
@@ -209,7 +210,7 @@ func (wa *WebApp) editorPOST(r *http.Request, response *Response) (*Response, er
 		runnerCtx, runnerCancel := context.WithTimeout(context.Background(), RunnerTimeout)
 		defer runnerCancel()
 
-		cmd := wa.Runner.StartRunnerContainer(runnerCtx, language)
+		cmd := wa.Runner.StartRunnerContainer(runnerCtx, image)
 		out, err := wa.Runner.GetContainerOutput(cmd)
 
 		if err != nil {
@@ -242,7 +243,7 @@ func (wa *WebApp) editorPOST(r *http.Request, response *Response) (*Response, er
 	taskInCtx, taskInCancel := context.WithTimeout(context.Background(), RunnerTimeout)
 	defer taskInCancel()
 
-	cmdX := wa.Runner.StartTaskInsideContainer(taskInCtx, containerID)
+	cmdX := wa.Runner.StartTaskInsideContainer(taskInCtx, containerID, shell)
 	msg, err := wa.Runner.GetContainerOutput(cmdX)
 
 	if err != nil {
