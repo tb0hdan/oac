@@ -1,9 +1,24 @@
 <html>
 <head>
     <title>OAC Editor Playground</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jquery/3.5.1/jquery.min.js"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.56.0/codemirror.css">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.56.0/codemirror.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.56.0/mode/python/python.js"></script>
+
+    <!-- has to be last -->
     <link rel="stylesheet" type="text/css" href="/static/style.css">
 </head>
 <body>
+    <script>
+	$( document ).ready(function() {
+    		var editor = CodeMirror.fromTextArea(document.getElementById("comment"), {
+        	lineNumbers: true, mode: "python"});
+		var results = CodeMirror.fromTextArea(document.getElementById("output"), {
+        	lineNumbers: true});
+	});
+    </script>
+
  <form action="/editor" id="usrform" method="POST">
     <input id="id" name="id" type="hidden" value="{{.ID}}">
     <select id="language" name="language">
@@ -14,10 +29,10 @@
     <button type="submit">Run</button>
 </form>
 
-<textarea name="comment" form="usrform">{{.Input}}</textarea>
+<textarea id="comment" name="comment" form="usrform">{{.Input}}</textarea>
 
 
 <br>
-<textarea name="output">{{.Output}}</textarea>
+<textarea id="output" name="output">{{.Output}}</textarea>
 </body>
 </html>

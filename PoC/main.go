@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"html/template"
@@ -23,6 +24,35 @@ const (
 	RunnerTimeout = 10 * time.Second
 	StopTimeout   = 10 * time.Second
 )
+
+type DockerCmd struct {
+	cmd *exec.Cmd
+}
+
+func (dc *DockerCmd) Output() (string, error) {
+	out, err := dc.cmd.StdoutPipe()
+	if err != nil {
+		return "", err
+	}
+
+	err = dc.cmd.Start()
+	if err != nil {
+		return "", err
+	}
+
+	output, err := ioutil.ReadAll(out)
+	if err != nil {
+		return "", err
+	}
+
+	err = dc.cmd.Wait()
+
+	if err != nil {
+		return "", err
+	}
+
+	return string(output), nil
+}
 
 func NewDR(myIP string, cache *memcache.CacheType) *DockerRunner {
 	dockerBinary, lookErr := exec.LookPath("docker")
@@ -57,13 +87,13 @@ func (dr *DockerRunner) SetRunnerUUID(runnerUUID string) {
 	dr.RunnerUUID = runnerUUID
 }
 
-func (dr *DockerRunner) ListContainersCmd(ctx context.Context) *exec.Cmd {
-	return exec.CommandContext(ctx, dr.DockerBinary, "ps",
-		"--format", "{{.Names}}")
+func (dr *DockerRunner) ListContainersCmd(ctx context.Context) *DockerCmd {
+	return &DockerCmd{exec.CommandContext(ctx, dr.DockerBinary, "ps",
+		"--format", "{{.Names}}")}
 }
 
 func (dr *DockerRunner) ListContainers(ctx context.Context) (result []string) {
-	out, err := dr.GetContainerOutput(dr.ListContainersCmd(ctx))
+	out, err := dr.ListContainersCmd(ctx).Output()
 	if err != nil {
 		panic(err)
 	}
@@ -73,59 +103,33 @@ func (dr *DockerRunner) ListContainers(ctx context.Context) (result []string) {
 	return
 }
 
-func (dr *DockerRunner) StartRunnerContainer(ctx context.Context, image string) *exec.Cmd {
-	return exec.CommandContext(ctx, dr.DockerBinary, "run", "-d",
+func (dr *DockerRunner) StartRunnerContainer(ctx context.Context, image string) *DockerCmd {
+	return &DockerCmd{exec.CommandContext(ctx, dr.DockerBinary, "run", "-d",
 		fmt.Sprintf("--name=oac-%s", dr.RunnerUUID),
 		"--network=none", "--memory=128m", "--memory-swap=128m",
 		"--read-only",
 		"-v", fmt.Sprintf("%s:/data:ro", dr.Volume),
 		image, "sh",
-		"-c", "while :; do sleep 1; done")
+		"-c", "while :; do sleep 1; done")}
 }
 
-func (dr *DockerRunner) StartTaskInsideContainer(ctx context.Context, containerID, shell string) *exec.Cmd {
-	return exec.CommandContext(ctx, dr.DockerBinary, "exec",
+func (dr *DockerRunner) StartTaskInsideContainer(ctx context.Context, containerID, shell string) *DockerCmd {
+	return &DockerCmd{exec.CommandContext(ctx, dr.DockerBinary, "exec",
 		containerID,
-		shell, "/data/script")
+		shell, "/data/script")}
 }
 
-func (dr *DockerRunner) StartTaskContainer(ctx context.Context) *exec.Cmd {
-	return exec.CommandContext(ctx, dr.DockerBinary, "run",
+func (dr *DockerRunner) StartTaskContainer(ctx context.Context) *DockerCmd {
+	return &DockerCmd{exec.CommandContext(ctx, dr.DockerBinary, "run",
 		"-v", fmt.Sprintf("%s:/data", dr.Volume),
 		"alpine", "wget", "-O", "/data/script",
 		fmt.Sprintf("http://%s/code/%s", dr.MyIP, dr.RunnerUUID),
-	)
+	)}
 }
 
-func (dr *DockerRunner) StopContainer(ctx context.Context, containerID string) *exec.Cmd {
-	return exec.CommandContext(ctx, dr.DockerBinary, "stop",
-		"-t", "1", containerID)
-}
-
-func (dr *DockerRunner) GetContainerOutput(cmd *exec.Cmd) (string, error) {
-	out, err := cmd.StdoutPipe()
-
-	if err != nil {
-		return "", err
-	}
-
-	err = cmd.Start()
-	if err != nil {
-		return "", err
-	}
-
-	output, err := ioutil.ReadAll(out)
-	if err != nil {
-		return "", err
-	}
-
-	err = cmd.Wait()
-
-	if err != nil {
-		return "", err
-	}
-
-	return string(output), nil
+func (dr *DockerRunner) StopContainer(ctx context.Context, containerID string) *DockerCmd {
+	return &DockerCmd{exec.CommandContext(ctx, dr.DockerBinary, "stop",
+		"-t", "1", containerID)}
 }
 
 type Response struct {
@@ -140,7 +144,6 @@ type WebApp struct {
 
 func (wa *WebApp) writeCode(runnerUUID, code string) error {
 	f, err := os.Create(path.Join("code", runnerUUID))
-
 	if err != nil {
 		return err
 	}
@@ -170,7 +173,6 @@ func (wa *WebApp) editorPOST(r *http.Request, response *Response) (*Response, er
 	)
 
 	err := r.ParseForm()
-
 	if err != nil {
 		return response, err
 	}
@@ -178,7 +180,7 @@ func (wa *WebApp) editorPOST(r *http.Request, response *Response) (*Response, er
 	runnerUUID := r.Form.Get("id")
 
 	if len(runnerUUID) == 0 {
-		return response, fmt.Errorf("runnerUUID is empty")
+		return response, errors.New("runnerUUID is empty")
 	}
 
 	// Save code
@@ -211,9 +213,7 @@ func (wa *WebApp) editorPOST(r *http.Request, response *Response) (*Response, er
 		runnerCtx, runnerCancel := context.WithTimeout(context.Background(), RunnerTimeout)
 		defer runnerCancel()
 
-		cmd := wa.Runner.StartRunnerContainer(runnerCtx, image)
-		out, err := wa.Runner.GetContainerOutput(cmd)
-
+		out, err := wa.Runner.StartRunnerContainer(runnerCtx, image).Output()
 		if err != nil {
 			return response, err
 		}
@@ -228,6 +228,7 @@ func (wa *WebApp) editorPOST(r *http.Request, response *Response) (*Response, er
 
 	if len(containerID) == 0 {
 		fmt.Println(wa.Runner.Cache.Get(runnerUUID))
+
 		return response, fmt.Errorf("containerID is empty")
 	}
 
@@ -236,17 +237,14 @@ func (wa *WebApp) editorPOST(r *http.Request, response *Response) (*Response, er
 	taskCtx, taskCancel := context.WithTimeout(context.Background(), RunnerTimeout)
 	defer taskCancel()
 
-	cmd := wa.Runner.StartTaskContainer(taskCtx)
-	out, err := wa.Runner.GetContainerOutput(cmd)
+	out, err := wa.Runner.StartTaskContainer(taskCtx).Output()
 	fmt.Println("Task ", out, err)
 
 	// Get task output
 	taskInCtx, taskInCancel := context.WithTimeout(context.Background(), RunnerTimeout)
 	defer taskInCancel()
 
-	cmdX := wa.Runner.StartTaskInsideContainer(taskInCtx, containerID, shell)
-	msg, err := wa.Runner.GetContainerOutput(cmdX)
-
+	msg, err := wa.Runner.StartTaskInsideContainer(taskInCtx, containerID, shell).Output()
 	if err != nil {
 		msg += err.Error()
 	}
@@ -270,10 +268,8 @@ func (wa *WebApp) editorPOST(r *http.Request, response *Response) (*Response, er
 	return response, nil
 }
 
-func (wa *WebApp) Editor(w http.ResponseWriter, r *http.Request) { // nolint:funlen
-	var (
-		err error
-	)
+func (wa *WebApp) Editor(w http.ResponseWriter, r *http.Request) {
+	var err error
 
 	id, err := uuid.NewRandom()
 	if err != nil {
@@ -301,6 +297,7 @@ func (wa *WebApp) Editor(w http.ResponseWriter, r *http.Request) { // nolint:fun
 
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
+
 		return
 	}
 }
@@ -311,22 +308,21 @@ func (wa *WebApp) IndexPage(w http.ResponseWriter, r *http.Request) {
 
 	t := template.Must(template.ParseFiles("index.html"))
 	err := t.Execute(w, nil)
-
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
+
 		return
 	}
 }
 
 func main() {
-	var (
-		extIP = flag.String("ext-ip", "", "Specify non-local IP")
-	)
+	extIP := flag.String("ext-ip", "", "Specify non-local IP")
 
 	flag.Parse()
 
 	if len(*extIP) == 0 {
 		fmt.Println("Cannot run without non-local IP, e.g. 192.168.0.100")
+
 		return
 	}
 
@@ -338,9 +334,7 @@ func main() {
 
 	for _, cid := range runner.ListContainers(ctx) {
 		if strings.HasPrefix(cid, "oac-") {
-			cmd := runner.StopContainer(ctx, cid)
-			out, err := runner.GetContainerOutput(cmd)
-
+			out, err := runner.StopContainer(ctx, cid).Output()
 			if err != nil {
 				panic(err)
 			}
@@ -363,7 +357,7 @@ func main() {
 
 	srv := http.Server{Addr: fmt.Sprintf("%s:8000", *extIP), Handler: r}
 
-	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		panic(err)
 	}
 }
